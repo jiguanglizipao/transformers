@@ -330,14 +330,17 @@ class LRP_LlamaAttention(nn.Module):
             )
             key_slices = self.k_proj.weight.split(key_value_slicing, dim=0)
             value_slices = self.v_proj.weight.split(key_value_slicing, dim=0)
+            query_bias_slices = self.q_proj.bias.split((self.num_heads * self.head_dim) // self.config.pretraining_tp, dim=0)
+            key_bias_slices = self.k_proj.bias.split(key_value_slicing, dim=0)
+            value_bias_slices = self.v_proj.bias.split(key_value_slicing, dim=0)
 
-            query_states = [F.linear(hidden_states, query_slices[i]) for i in range(self.config.pretraining_tp)]
+            query_states = [F.linear(hidden_states, query_slices[i],bias=query_bias_slices[i]) for i in range(self.config.pretraining_tp)]
             query_states = torch.cat(query_states, dim=-1)
 
-            key_states = [F.linear(hidden_states, key_slices[i]) for i in range(self.config.pretraining_tp)]
+            key_states = [F.linear(hidden_states, key_slices[i],bias=key_bias_slices[i]) for i in range(self.config.pretraining_tp)]
             key_states = torch.cat(key_states, dim=-1)
 
-            value_states = [F.linear(hidden_states, value_slices[i]) for i in range(self.config.pretraining_tp)]
+            value_states = [F.linear(hidden_states, value_slices[i],bias=value_bias_slices[i]) for i in range(self.config.pretraining_tp)]
             value_states = torch.cat(value_states, dim=-1)
 
         else:
@@ -625,27 +628,28 @@ class LRP_LlamaLowRankMLP(nn.Module):
         self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x):
-        # #TODO pretraining_tp>1 ffn function forward
-        # if self.config.pretraining_tp > 1:
-        #     slice = self.intermediate_size // self.config.pretraining_tp
-        #     gate_proj_slices = self.gate_proj.weight.split(slice, dim=0)
-        #     up_proj_slices = self.up_proj.weight.split(slice, dim=0)
-        #     down_proj_slices = self.down_proj.weight.split(slice, dim=1)
+        if self.config.pretraining_tp > 1:
+            slice = self.intermediate_size // self.config.pretraining_tp
+            gate_proj_slices = self.gate_proj.weight_B.weight.split(slice, dim=0)
+            up_proj_slices = self.up_proj.weight_B.weight.split(slice, dim=0)
+            down_proj_slices = self.down_proj.weight_A.weight.split(slice, dim=1)
+            gate_proj_xA = F.linear(x,self.gate_proj.weight_A.weight)
+            gate_proj_xAB = torch.cat(
+                [F.linear(gate_proj_xA, gate_proj_slices[i]) 
+                for i in range(self.config.pretraining_tp)], dim=-1)
+            up_proj_xA = F.linear(x,self.up_proj.weight_A.weight)
+            up_proj_xAB = torch.cat(
+                [F.linear(up_proj_xA, up_proj_slices[i]) 
+                for i in range(self.config.pretraining_tp)], dim=-1)
 
-        #     gate_proj = torch.cat(
-        #         [F.linear(x, gate_proj_slices[i]) for i in range(self.config.pretraining_tp)], dim=-1
-        #     )
-        #     up_proj = torch.cat([F.linear(x, up_proj_slices[i]) for i in range(self.config.pretraining_tp)], dim=-1)
-
-        #     intermediate_states = (self.act_fn(gate_proj) * up_proj).split(slice, dim=2)
-        #     down_proj = [
-        #         F.linear(intermediate_states[i], down_proj_slices[i]) for i in range(self.config.pretraining_tp)
-        #     ]
-        #     down_proj = sum(down_proj)
-        # else:
-
-        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-
+            intermediate_states = (self.act_fn(gate_proj_xAB) * up_proj_xAB).split(slice, dim=2)
+            down_proj_xA = [
+                F.linear(intermediate_states[i], down_proj_slices[i])
+                for i in range(self.config.pretraining_tp)
+            ]
+            down_proj = F.linear(sum(down_proj_xA),self.down_proj.weight_B.weight)
+        else:
+            down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
         return down_proj
 
 

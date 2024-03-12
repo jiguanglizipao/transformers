@@ -330,14 +330,17 @@ class LlamaAttention(nn.Module):
             )
             key_slices = self.k_proj.weight.split(key_value_slicing, dim=0)
             value_slices = self.v_proj.weight.split(key_value_slicing, dim=0)
+            query_bias_slices = self.q_proj.bias.split((self.num_heads * self.head_dim) // self.config.pretraining_tp, dim=0)
+            key_bias_slices = self.k_proj.bias.split(key_value_slicing, dim=0)
+            value_bias_slices = self.v_proj.bias.split(key_value_slicing, dim=0)
 
-            query_states = [F.linear(hidden_states, query_slices[i]) for i in range(self.config.pretraining_tp)]
+            query_states = [F.linear(hidden_states, query_slices[i],bias=query_bias_slices[i]) for i in range(self.config.pretraining_tp)]
             query_states = torch.cat(query_states, dim=-1)
 
-            key_states = [F.linear(hidden_states, key_slices[i]) for i in range(self.config.pretraining_tp)]
+            key_states = [F.linear(hidden_states, key_slices[i],bias=key_bias_slices[i]) for i in range(self.config.pretraining_tp)]
             key_states = torch.cat(key_states, dim=-1)
 
-            value_states = [F.linear(hidden_states, value_slices[i]) for i in range(self.config.pretraining_tp)]
+            value_states = [F.linear(hidden_states, value_slices[i],bias=value_bias_slices[i]) for i in range(self.config.pretraining_tp)]
             value_states = torch.cat(value_states, dim=-1)
 
         else:
